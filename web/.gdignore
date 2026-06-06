@@ -1,0 +1,1 @@
+# Keeps Godot's importer from scanning the JS bridge as a project resource.
