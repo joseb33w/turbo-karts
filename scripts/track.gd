@@ -1,13 +1,16 @@
 extends Node3D
 ## Procedural looping race circuit, built from an arena spec (see arenas.gd). A closed
-## Catmull-Rom curve from the spec's control points defines the centerline; road / kerb
-## / checker meshes are generated from it, themed per arena (sky, sun, ground, kerbs,
-## fog, water, decor). The kart asks this node where the road is (closest offset,
-## lateral distance, surface height, tangent) instead of using mesh collision.
+## Catmull-Rom curve from the spec's control points defines the centerline; road / kerb /
+## checker meshes are generated from it. This round it's textured (asphalt with painted
+## lane lines, grass / sand ground, rippling water), lit with a shadow-casting sun, dotted
+## with drifting clouds and a start/finish gantry, so it reads as a real place. The kart
+## asks this node where the road is (closest offset, lateral distance, surface height,
+## tangent) instead of using mesh collision.
 
 const HALF_WIDTH := 7.0
 const GRASS_MARGIN := 6.5            # drivable grass beyond the road edge
 const SHORTCUT_HALF := 3.2
+const ROAD_TILE := 18.0              # metres of track per asphalt texture tile
 
 var spec: Dictionary = {}
 var theme: Dictionary = {}
@@ -23,6 +26,10 @@ var _shortcut_a := Vector3.ZERO
 var _shortcut_b := Vector3.ZERO
 var _shortcut_active := false
 
+var _water_mat: StandardMaterial3D = null
+var _clouds: Array = []                     # [{node, speed}]
+var _t := 0.0
+
 
 func build(arena: Dictionary) -> void:
 	spec = arena
@@ -35,8 +42,21 @@ func build(arena: Dictionary) -> void:
 	_build_road()
 	_build_kerbs()
 	_build_start_line()
+	_build_gantry()
 	_build_ramps()
 	_build_decor()
+	_build_clouds()
+
+
+func _process(delta: float) -> void:
+	_t += delta
+	if _water_mat:
+		_water_mat.uv1_offset = Vector3(_t * 0.02, _t * 0.015, 0)
+	for c: Dictionary in _clouds:
+		var node := c["node"] as Node3D
+		node.position.x += float(c["speed"]) * delta
+		if node.position.x > 460.0:
+			node.position.x = -460.0
 
 
 func _control() -> Array:
@@ -148,7 +168,7 @@ func grid_transforms(count: int) -> Array[Dictionary]:
 	return out
 
 
-# ---------------------------------------------------------------- meshes
+# ---------------------------------------------------------------- materials
 
 func _mat(c: Color, rough := 0.9, emit := 0.0) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
@@ -159,6 +179,18 @@ func _mat(c: Color, rough := 0.9, emit := 0.0) -> StandardMaterial3D:
 		m.emission_enabled = true
 		m.emission = c
 		m.emission_energy_multiplier = emit
+	return m
+
+
+func _tex_mat(tex: ImageTexture, tint: Color, tiles: float, rough := 0.92) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = tint
+	m.albedo_texture = tex
+	m.roughness = rough
+	m.metallic = 0.0
+	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+	if tiles != 1.0:
+		m.uv1_scale = Vector3(tiles, tiles, 1.0)
 	return m
 
 
@@ -186,6 +218,8 @@ func _build_environment() -> void:
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.ambient_light_energy = float(theme.get("ambient", 1.1))
+	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	env.tonemap_white = 1.1
 	if bool(theme.get("fog", true)):
 		env.fog_enabled = true
 		env.fog_light_color = theme.get("fog_color", Color(0.7, 0.86, 1.0))
@@ -197,25 +231,44 @@ func _build_environment() -> void:
 	sun.rotation_degrees = theme.get("sun_rot", Vector3(-52, -48, 0))
 	sun.light_energy = float(theme.get("sun_energy", 1.15))
 	sun.light_color = theme.get("sun_color", Color(1.0, 0.97, 0.9))
-	sun.shadow_enabled = false
+	if bool(theme.get("shadows", true)):
+		sun.shadow_enabled = true
+		sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
+		sun.directional_shadow_max_distance = 95.0
+		sun.shadow_bias = 0.05
 	add_child(sun)
 
 	if bool(theme.get("water", false)):
 		var water := MeshInstance3D.new()
 		var wp := PlaneMesh.new()
-		wp.size = Vector2(2000, 2000)
+		wp.size = Vector2(3000, 3000)
 		water.mesh = wp
-		water.material_override = _mat(theme.get("water_color", Color(0.30, 0.62, 0.85)), 0.3)
+		_water_mat = _tex_mat(TKTex.water(theme.get("water_color", Color(0.30, 0.62, 0.85))), Color(1, 1, 1), 300.0, 0.12)
+		_water_mat.metallic = 0.3
+		water.material_override = _water_mat
+		water.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		water.position = Vector3(0, float(theme.get("water_y", -5.0)), 0)
 		add_child(water)
 
 	var ground := MeshInstance3D.new()
 	var gp := PlaneMesh.new()
-	gp.size = Vector2(640, 640)
+	gp.size = Vector2(1200, 1200)
 	ground.mesh = gp
-	ground.material_override = _mat(theme.get("ground", Color(0.36, 0.72, 0.34)))
+	var gtex := _ground_texture()
+	ground.material_override = _tex_mat(gtex, Color(1, 1, 1), 150.0)
+	ground.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	ground.position = Vector3(0, -0.05, 0)
 	add_child(ground)
+
+
+func _ground_texture() -> ImageTexture:
+	match str(theme.get("ground_tex", "grass")):
+		"sand":
+			return TKTex.sand(theme.get("ground", Color(0.85, 0.68, 0.40)))
+		"dark":
+			return TKTex.grass(theme.get("ground", Color(0.08, 0.09, 0.12)))
+		_:
+			return TKTex.grass(theme.get("ground", Color(0.30, 0.62, 0.30)))
 
 
 func _build_road() -> void:
@@ -224,6 +277,7 @@ func _build_road() -> void:
 	var n := 260
 	var prev_l := Vector3.ZERO
 	var prev_r := Vector3.ZERO
+	var prev_v := 0.0
 	for i in n + 1:
 		var off := length * float(i) / float(n)
 		var c := curve.sample_baked(fposmod(off, length))
@@ -231,15 +285,27 @@ func _build_road() -> void:
 		var nrm := Vector3(-dir.z, 0, dir.x)
 		var l := c + nrm * HALF_WIDTH + Vector3(0, 0.02, 0)
 		var r := c - nrm * HALF_WIDTH + Vector3(0, 0.02, 0)
+		var v := off / ROAD_TILE
 		if i > 0:
-			_quad(st, prev_l, l, r, prev_r)
+			_road_quad(st, prev_l, l, r, prev_r, prev_v, v)
 		prev_l = l
 		prev_r = r
+		prev_v = v
 	st.generate_normals()
 	var mi := MeshInstance3D.new()
 	mi.mesh = st.commit()
-	mi.material_override = _mat(theme.get("road", Color(0.28, 0.29, 0.34)))
+	mi.material_override = _tex_mat(TKTex.road(theme.get("road_tint", Color(1, 1, 1))), Color(1, 1, 1), 1.0, 0.85)
 	add_child(mi)
+
+
+func _road_quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3, v0: float, v1: float) -> void:
+	# a=prev_left b=left c=right d=prev_right ; u: left=0 right=1
+	st.set_uv(Vector2(0, v0)); st.add_vertex(a)
+	st.set_uv(Vector2(0, v1)); st.add_vertex(b)
+	st.set_uv(Vector2(1, v1)); st.add_vertex(c)
+	st.set_uv(Vector2(0, v0)); st.add_vertex(a)
+	st.set_uv(Vector2(1, v1)); st.add_vertex(c)
+	st.set_uv(Vector2(1, v0)); st.add_vertex(d)
 
 
 func _build_kerbs() -> void:
@@ -259,8 +325,8 @@ func _build_kerbs() -> void:
 			var c := curve.sample_baked(fposmod(off, length))
 			var dir := tangent_at(off)
 			var nrm := Vector3(-dir.z, 0, dir.x) * side
-			var a := c + nrm * inner + Vector3(0, 0.06, 0)
-			var b := c + nrm * outer + Vector3(0, 0.06, 0)
+			var a := c + nrm * inner + Vector3(0, 0.07, 0)
+			var b := c + nrm * outer + Vector3(0, 0.07, 0)
 			if i > 0:
 				var col := ca if i % 2 == 0 else cb
 				_quad_c(st, pl, a, b, po, col)
@@ -301,6 +367,64 @@ func _build_start_line() -> void:
 	add_child(mi)
 
 
+func _build_gantry() -> void:
+	var off0 := 3.0
+	var dir := tangent_at(off0)
+	var nrm := Vector3(-dir.z, 0, dir.x)
+	var c0 := curve.sample_baked(off0)
+	var span := HALF_WIDTH + 1.4
+	var post_mat := _mat(Color(0.16, 0.17, 0.22), 0.6)
+	for sx: float in [-1.0, 1.0]:
+		var post := MeshInstance3D.new()
+		var pm := BoxMesh.new()
+		pm.size = Vector3(0.6, 7.2, 0.6)
+		post.mesh = pm
+		post.material_override = post_mat
+		post.position = c0 + nrm * (span * sx) + Vector3(0, 3.6, 0)
+		add_child(post)
+	var beam := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(span * 2.0 + 0.6, 1.2, 0.7)
+	beam.mesh = bm
+	beam.material_override = _mat(Color(0.10, 0.11, 0.15), 0.5)
+	beam.position = c0 + Vector3(0, 7.0, 0)
+	beam.basis = Basis(Vector3.UP, atan2(nrm.x, nrm.z))
+	add_child(beam)
+
+	var banner := MeshInstance3D.new()
+	var bnm := BoxMesh.new()
+	bnm.size = Vector3(span * 2.0, 0.7, 0.1)
+	banner.mesh = bnm
+	banner.material_override = _checker_texture_mat()
+	banner.position = c0 + Vector3(0, 6.2, 0)
+	banner.basis = Basis(Vector3.UP, atan2(nrm.x, nrm.z))
+	add_child(banner)
+
+	var sign := Label3D.new()
+	sign.text = "FINISH"
+	sign.font_size = 120
+	sign.pixel_size = 0.012
+	sign.modulate = theme.get("kerb_a", Color(1.0, 0.85, 0.2))
+	sign.outline_size = 24
+	sign.outline_modulate = Color(0, 0, 0, 0.85)
+	sign.position = c0 + Vector3(0, 7.0, 0)
+	add_child(sign)
+
+
+func _checker_texture_mat() -> StandardMaterial3D:
+	var img := Image.create(32, 8, false, Image.FORMAT_RGB8)
+	for y in 8:
+		for x in 32:
+			var on := (x / 4 + y / 4) % 2 == 0
+			img.set_pixel(x, y, Color.WHITE if on else Color(0.05, 0.05, 0.05))
+	var tex := ImageTexture.create_from_image(img)
+	var m := StandardMaterial3D.new()
+	m.albedo_texture = tex
+	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	m.roughness = 0.7
+	return m
+
+
 func _build_ramps() -> void:
 	for pad: Dictionary in ramp_pads:
 		var pos: Vector3 = pad["pos"]
@@ -321,14 +445,14 @@ func _build_decor() -> void:
 		return
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 4242
-	var count := 26
+	var count := 30
 	for i in count:
 		var off := length * float(i) / float(count) + rng.randf_range(-4.0, 4.0)
 		var c := curve.sample_baked(fposmod(off, length))
 		var dir := tangent_at(off)
 		var nrm := Vector3(-dir.z, 0, dir.x)
 		var side := 1.0 if i % 2 == 0 else -1.0
-		var dist := HALF_WIDTH + GRASS_MARGIN + rng.randf_range(2.0, 10.0)
+		var dist := HALF_WIDTH + GRASS_MARGIN + rng.randf_range(2.0, 11.0)
 		var base := c + nrm * side * dist
 		base.y = 0.0
 		match kind:
@@ -340,28 +464,33 @@ func _build_decor() -> void:
 func _make_tree(base: Vector3, rng: RandomNumberGenerator) -> void:
 	var trunk := MeshInstance3D.new()
 	var tm := CylinderMesh.new()
-	tm.top_radius = 0.3
-	tm.bottom_radius = 0.4
-	tm.height = 2.0
+	tm.top_radius = 0.28
+	tm.bottom_radius = 0.42
+	tm.height = 2.2
 	trunk.mesh = tm
-	trunk.material_override = _mat(Color(0.5, 0.34, 0.2))
-	trunk.position = base + Vector3(0, 1.0, 0)
+	trunk.material_override = _mat(Color(0.42, 0.29, 0.17), 0.85)
+	trunk.position = base + Vector3(0, 1.1, 0)
 	add_child(trunk)
-	var leaf := MeshInstance3D.new()
-	var lm := SphereMesh.new()
-	var r := rng.randf_range(1.6, 2.4)
-	lm.radius = r
-	lm.height = r * 2.0
-	leaf.mesh = lm
-	var g := rng.randf_range(0.55, 0.8)
-	leaf.material_override = _mat(Color(0.2, g, 0.28))
-	leaf.position = base + Vector3(0, 2.6, 0)
-	add_child(leaf)
+	var g := rng.randf_range(0.5, 0.78)
+	var leaf_mat := _mat(Color(0.16, g, 0.26), 0.85)
+	var tip_mat := _mat(Color(0.22, g + 0.1, 0.30), 0.85)
+	for blob in 3:
+		var leaf := MeshInstance3D.new()
+		var lm := SphereMesh.new()
+		var r := rng.randf_range(1.3, 1.9) - blob * 0.22
+		lm.radius = r
+		lm.height = r * 1.9
+		lm.radial_segments = 8
+		lm.rings = 5
+		leaf.mesh = lm
+		leaf.material_override = tip_mat if blob == 2 else leaf_mat
+		leaf.position = base + Vector3(rng.randf_range(-0.3, 0.3), 2.6 + blob * 0.7, rng.randf_range(-0.3, 0.3))
+		add_child(leaf)
 
 
 func _make_cactus(base: Vector3, rng: RandomNumberGenerator) -> void:
 	var col := Color(0.20, 0.52, 0.28)
-	var mat := _mat(col)
+	var mat := _mat(col, 0.8)
 	var h := rng.randf_range(2.2, 3.6)
 	var trunk := MeshInstance3D.new()
 	var tm := CapsuleMesh.new()
@@ -390,24 +519,62 @@ func _make_cactus(base: Vector3, rng: RandomNumberGenerator) -> void:
 
 
 func _make_building(base: Vector3, rng: RandomNumberGenerator) -> void:
-	var h := rng.randf_range(8.0, 22.0)
+	var h := rng.randf_range(9.0, 24.0)
 	var w := rng.randf_range(4.0, 8.0)
 	var body := MeshInstance3D.new()
 	var bm := BoxMesh.new()
 	bm.size = Vector3(w, h, w)
 	body.mesh = bm
-	body.material_override = _mat(Color(0.05, 0.05, 0.09), 0.6)
+	var palette := [Color(0.1, 0.95, 1.0), Color(1.0, 0.2, 0.85), Color(0.7, 0.4, 1.0), Color(1.0, 0.8, 0.2)]
+	var wm := StandardMaterial3D.new()
+	wm.albedo_color = Color(0.04, 0.04, 0.07)
+	wm.roughness = 0.55
+	wm.metallic = 0.2
+	wm.emission_enabled = true
+	wm.emission_texture = TKTex.windows(palette)
+	wm.emission_energy_multiplier = 2.2
+	wm.uv1_scale = Vector3(1.0, h / w, 1.0)
+	wm.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	body.material_override = wm
 	body.position = base + Vector3(0, h * 0.5, 0)
 	add_child(body)
-	var neon := MeshInstance3D.new()
-	var nm := BoxMesh.new()
-	nm.size = Vector3(w + 0.2, 0.5, w + 0.2)
-	neon.mesh = nm
-	var palette := [Color(0.1, 0.95, 1.0), Color(1.0, 0.2, 0.85), Color(0.7, 0.4, 1.0), Color(1.0, 0.8, 0.2)]
+	var cap := MeshInstance3D.new()
+	var cm := BoxMesh.new()
+	cm.size = Vector3(w + 0.3, 0.5, w + 0.3)
+	cap.mesh = cm
 	var nc: Color = palette[rng.randi() % palette.size()]
-	neon.material_override = _mat(nc, 0.4, 2.6)
-	neon.position = base + Vector3(0, h - rng.randf_range(1.0, 3.0), 0)
-	add_child(neon)
+	cap.material_override = _mat(nc, 0.4, 2.6)
+	cap.position = base + Vector3(0, h, 0)
+	add_child(cap)
+
+
+func _build_clouds() -> void:
+	if not bool(theme.get("clouds", true)):
+		return
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 808
+	var cc: Color = theme.get("cloud_color", Color(1, 1, 1))
+	var mat := _mat(cc, 1.0)
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	for i in 9:
+		var node := Node3D.new()
+		node.position = Vector3(rng.randf_range(-440, 440), rng.randf_range(48, 86), rng.randf_range(-440, 440))
+		for puff in rng.randi_range(3, 5):
+			var m := MeshInstance3D.new()
+			var sm := SphereMesh.new()
+			var r := rng.randf_range(8.0, 16.0)
+			sm.radius = r
+			sm.height = r * 1.4
+			sm.radial_segments = 8
+			sm.rings = 5
+			m.mesh = sm
+			m.material_override = mat
+			m.scale = Vector3(1.0, 0.5, 1.0)
+			m.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			m.position = Vector3(rng.randf_range(-14, 14), rng.randf_range(-3, 3), rng.randf_range(-10, 10))
+			node.add_child(m)
+		add_child(node)
+		_clouds.append({"node": node, "speed": rng.randf_range(1.5, 4.0)})
 
 
 func _quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> void:
