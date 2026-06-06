@@ -1,53 +1,46 @@
 # Goal
-Round 2 of **Turbo Karts**. Build on the shipped Godot 4.6.3 web racer:
-1. **Mobile default-browser playability** — verified to boot + play in a phone-sized
-   viewport (portrait + landscape), big touch targets, safe-area margins, brake button.
-2. **Better looks + better 3D UI** — a polished, themed menu/HUD/finish system with
-   rounded glass panels, a 3D rotating-kart showroom backdrop, animated countdown,
-   and per-arena skies/lighting.
-3. **Multiple race arenas** the player can choose from (distinct track shapes, skies,
-   ground, decor, fog/water, lap counts).
-4. **Points economy + garage** — collected coins bank into a persistent wallet used to
-   **buy faster vehicles**. Persistence is real (Supabase Postgres), not localStorage.
+Round 3 of **Turbo Karts**. Three asks from the player:
+1. **AI / CPU opponents** so single player is a real race (today you're always "1st of 1").
+2. **Real mobile controls** — the old on-screen buttons used Godot `Button` nodes, which
+   only ever receive the *single* emulated mouse pointer, so a phone player could never
+   hold steer **and** drift at the same time. Replace with a true **multitouch** pad.
+3. **Less robotic, better art + sound** — procedural textures (asphalt with lane lines,
+   grass, sand, water, lit windows), shadows + MSAA, richer kart models with rolling
+   wheels, glassier item/coin art, plus a fuller engine, looping music, and new SFX.
 
-# Backend (Supabase — verified)
-The shared project enforces email confirmation and disables anonymous sign-in, so a
-client-side email/password flow would strand casual players at a "check your inbox"
-wall (the forbidden round-trip). Instead the wallet/garage is a **server-authoritative
-profile** keyed by a per-device token (player_id + secret in localStorage, like a
-session token — the DATA lives in Postgres):
-- Table `public."usr_nmexs7bytxq2_turbo_karts_profiles"` — RLS on, **no anon grants**.
-- `SECURITY DEFINER` RPCs (granted to anon, secret-validated): `..._tk_login`,
-  `..._tk_bank` (add coins + record best lap), `..._tk_buy` (server-priced), `..._tk_select`.
-- Verified end-to-end with the anon key: create/persist, server-side pricing, insufficient
-  funds rejected, wrong-secret rejected, direct table SELECT blocked.
+# Backend
+No backend change. The existing server-authoritative Supabase economy (wallet/garage RPCs
+in `supabase/migrations/`) is untouched; AI/visuals/audio are all client-side.
 
 # Files to touch
-- `project.godot` — add `Profile` autoload.
-- `scripts/arenas.gd` (new) — 4 arena specs (control points + theme).
-- `scripts/garage.gd` (new) — kart catalog (stats multipliers, price, color, style).
-- `scripts/profile.gd` (new, autoload) — wallet/garage state; talks to the bridge RPCs.
-- `scripts/ui_theme.gd` (new) — shared polished UI styling helpers.
-- `scripts/menu.gd` (new) — tap-to-start → main menu, garage, arena select, 3D showroom.
-- `main.gd` — boot into the menu; race/menu transitions.
-- `scripts/game.gd` — parameterized by arena + kart; bank coins on finish; exit-to-menu.
-- `scripts/track.gd` — build from an arena spec (shape, sky, ground, decor, water, fog).
-- `scripts/kart.gd` — apply per-kart stat multipliers.
-- `scripts/kart_build.gd` — per-style kart models.
-- `scripts/hud.gd` — polished HUD + finish screen + brake button + coins.
-- `web/bridge.js` — add `window.gameProfile` (RPC client) alongside `gameNet`.
-- `README.md`, `.env.example` (+ `.env`) — document the economy + table prefix.
+- `scripts/ai_kart.gd` (new) — CPU racer: rail-follows the centerline with lane changes +
+  rubber-banding, ranked by `prog`, spun by the player's shells/bananas.
+- `scripts/textures.gd` (new) — runtime procedural textures (no binary assets).
+- `scripts/touch_controls.gd` (new) — multitouch driving pad (raw `InputEventScreenTouch`
+  by finger index + mouse fallback), correct under `canvas_items` stretch.
+- `scripts/game.gd` — spawn 5 AI, fold them into position/leaderboard/entry count, let
+  shells + bananas hit them, finish confetti + fanfare, start music.
+- `scripts/kart.gd` — roll the wheels; keep handling.
+- `scripts/kart_build.gd` — richer kart (side pods, splitter, windshield, driver, exhaust,
+  hubcaps, metallic sheen, accent trim).
+- `scripts/track.gd` — textured road (UV lane lines) + ground + water, sun shadows, drifting
+  clouds, start/finish gantry, nicer trees/buildings.
+- `scripts/items.gd` — glassy item box, metallic coin, better banana + shell.
+- `scripts/hud.gd` — swap Button touch controls for the multitouch pad; hide it on finish.
+- `scripts/audio.gd` — fuller engine, seamless looping music, lap + finish SFX, drift screech.
+- `scripts/arenas.gd` — per-arena ground texture + tint + shadow flags.
+- `project.godot` — 2x MSAA, keep gl_compatibility / nothreads.
+- `README.md` — document opponents, mobile controls, the new art/sound.
 
 # Verification approach
-- `godot --headless --import` clean; export `nothreads` release; vetted smoke verifier.
-- Playwright drive in mobile portrait + landscape viewports: tap-to-start → menu →
-  arena select → garage (buy/select) → race → finish; multi-frame screenshots assert
-  motion, steering, HUD, menu polish.
-- Real Supabase RPC tests with the anon key (done): login/bank/buy/select + negatives.
-- 2-client Supabase Realtime broadcast test (multiplayer sync).
+- `godot --headless --import` clean (typed against the 4.6 INFERENCE_ON_VARIANT rule).
+- Export `nothreads` release; run the vetted smoke verifier (engine boots, canvas, clean
+  console, frames); read the saved frames to confirm karts, textures, HUD, touch pad.
+- Drive the multitouch pad in the headless browser (two simultaneous pointers) to confirm
+  steer + drift register together.
 - Deploy `out/` to R2 for the preview link.
 
 # Out of scope
-- Email/password accounts (infeasible: project forces email confirmation). Cross-device
-  uses a transfer code instead.
-- Server-authoritative race physics (multiplayer stays casual client-authoritative).
+- Syncing AI across multiplayer peers — AI are single-player/local (MP stays casual,
+  client-authoritative, as before).
+- Imported art/audio assets — everything stays procedural to keep the .pck tiny.
