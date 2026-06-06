@@ -1,0 +1,12 @@
+# Godot
+.godot/
+/out/
+export_presets.cfg.bak
+
+# Verification tooling (never committed to the game repo)
+verify/
+
+# Downloaded toolchain (never commit the engine/templates)
+godot
+*.tpz
+*.tmp
