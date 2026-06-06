@@ -5,8 +5,10 @@ extends CanvasLayer
 ## live leaderboard, and a rich finish card that banks + shows coins earned.
 
 const T := preload("res://scripts/ui_theme.gd")
+const TouchControls := preload("res://scripts/touch_controls.gd")
 
 var game: Node
+var _touch: Node
 
 var _lap: Label
 var _pos: Label
@@ -197,59 +199,14 @@ func _build_flash() -> void:
 
 
 func _build_touch() -> void:
-	var left := _round_btn("<", Color(0.18, 0.42, 0.85))
-	left.anchor_top = 1.0
-	left.anchor_bottom = 1.0
-	left.position = Vector2(28, -158)
-	_hold(left, "kart_left")
-
-	var right := _round_btn(">", Color(0.18, 0.42, 0.85))
-	right.anchor_top = 1.0
-	right.anchor_bottom = 1.0
-	right.position = Vector2(172, -158)
-	_hold(right, "kart_right")
-
-	var drift := _round_btn("DRIFT", Color(0.95, 0.5, 0.12))
-	drift.anchor_left = 1.0
-	drift.anchor_right = 1.0
-	drift.anchor_top = 1.0
-	drift.anchor_bottom = 1.0
-	drift.position = Vector2(-160, -158)
-	_hold(drift, "kart_drift")
-
-	var item := _round_btn("ITEM", Color(0.22, 0.72, 0.36), 108)
-	item.anchor_left = 1.0
-	item.anchor_right = 1.0
-	item.anchor_top = 1.0
-	item.anchor_bottom = 1.0
-	item.position = Vector2(-152, -296)
-	_hold(item, "kart_item")
-
-	var brake := _round_btn("BRK", Color(0.85, 0.26, 0.26), 100)
-	brake.anchor_left = 1.0
-	brake.anchor_right = 1.0
-	brake.anchor_top = 1.0
-	brake.anchor_bottom = 1.0
-	brake.position = Vector2(-300, -150)
-	_hold(brake, "kart_brake")
+	_touch = TouchControls.new()
+	add_child(_touch)
+	_touch.setup()
 
 
-func _round_btn(text: String, col: Color, sz := 132) -> Button:
-	var b := Button.new()
-	b.text = text
-	b.size = Vector2(sz, sz)
-	b.custom_minimum_size = Vector2(sz, sz)
-	var fs := 44 if text.length() <= 1 else 26
-	T.style_button(b, Color(col.r, col.g, col.b, 0.6), Color(1, 1, 1), fs, sz / 2)
-	var pressed := b.get_theme_stylebox("pressed") as StyleBoxFlat
-	pressed.bg_color = Color(col.r, col.g, col.b, 0.95)
-	add_child(b)
-	return b
-
-
-func _hold(btn: Button, action: String) -> void:
-	btn.button_down.connect(func() -> void: Input.action_press(action))
-	btn.button_up.connect(func() -> void: Input.action_release(action))
+func set_touch_enabled(on: bool) -> void:
+	if _touch:
+		_touch.set_enabled(on)
 
 
 func _build_finish() -> void:
@@ -399,10 +356,12 @@ func show_finish(placement: int, total: int, race_time: float, best: float, earn
 	_balance = balance
 	_finish_bal.text = "Wallet: %s coins" % _commas(balance)
 	_finish.visible = true
+	set_touch_enabled(false)
 
 
 func hide_finish() -> void:
 	_finish.visible = false
+	set_touch_enabled(true)
 
 
 func _ordinal(n: int) -> String:
