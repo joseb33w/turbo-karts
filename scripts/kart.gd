@@ -25,6 +25,11 @@ var track
 var audio
 var game
 
+var stat_speed := 1.0
+var stat_accel := 1.0
+var stat_turn := 1.0
+var stat_drift := 1.0
+
 var speed := 0.0
 var yaw := 0.0
 var vy := 0.0
@@ -60,15 +65,28 @@ var _spark_r: CPUParticles3D
 var _spark_mat: StandardMaterial3D
 
 
-func setup(track_ref: Node3D, audio_ref: Node, game_ref: Node, color: Color) -> void:
+func setup(track_ref: Node3D, audio_ref: Node, game_ref: Node, kart_def: Dictionary) -> void:
 	track = track_ref
 	audio = audio_ref
 	game = game_ref
-	var built: Dictionary = KartBuildC.build(color)
+	var st: Dictionary = kart_def.get("stats", {})
+	stat_speed = float(st.get("speed", 1.0))
+	stat_accel = float(st.get("accel", 1.0))
+	stat_turn = float(st.get("turn", 1.0))
+	stat_drift = float(st.get("drift", 1.0))
+	var built: Dictionary = KartBuildC.build_def(kart_def)
 	_model = built["root"]
 	_body = built["body"]
 	add_child(_model)
 	_build_fx()
+
+
+func _tier_thresh(i: int) -> float:
+	return MINI_TIERS[i] / stat_drift
+
+
+func _tier_boost(i: int) -> float:
+	return MINI_BOOST[i] * stat_drift
 
 
 func attach_camera(cam: Camera3D) -> void:
@@ -139,24 +157,24 @@ func _drive(delta: float, steer: float, drift_held: bool, on_grass: bool, surfac
 	var braking := control_enabled and spin_time <= 0.0 and not finished and Input.is_action_pressed("kart_brake")
 
 	# ----- target speed
-	var top := BASE_MAX + coin_bonus
+	var top := BASE_MAX * stat_speed + coin_bonus
 	if not on_grass:
 		pass
 	elif not on_road:
 		top *= GRASS_MULT
 	if boost_time > 0.0:
-		top = BOOST_MAX + coin_bonus
+		top = BOOST_MAX * stat_speed + coin_bonus
 	var target := top
 	if not control_enabled or finished:
 		target = 0.0
 	elif braking:
 		target = BRAKE_TARGET
 
-	var rate := ACCEL
+	var rate := ACCEL * stat_accel
 	if braking:
 		rate = BRAKE_DECEL
 	elif boost_time > 0.0:
-		rate = ACCEL * 2.4
+		rate = ACCEL * stat_accel * 2.4
 	elif target < speed:
 		rate = BRAKE_DECEL * 0.5
 	speed = move_toward(speed, target, rate * delta)
@@ -175,9 +193,9 @@ func _drive(delta: float, steer: float, drift_held: bool, on_grass: bool, surfac
 
 	# ----- steering
 	var turn_input := steer
-	var turn_rate := TURN
+	var turn_rate := TURN * stat_turn
 	if drifting:
-		turn_rate = DRIFT_TURN
+		turn_rate = DRIFT_TURN * stat_turn
 		turn_input = clampf(drift_dir * 0.7 + steer * 0.45, -1.2, 1.2)
 	var speed_factor := clampf(speed / 12.0, 0.0, 1.0)
 	if airborne:
@@ -225,10 +243,10 @@ func _release_drift() -> void:
 	drifting = false
 	var tier := 0
 	for i in MINI_TIERS.size():
-		if drift_charge >= MINI_TIERS[i]:
+		if drift_charge >= _tier_thresh(i):
 			tier = i + 1
 	if tier > 0:
-		boost_time = maxf(boost_time, MINI_BOOST[tier - 1])
+		boost_time = maxf(boost_time, _tier_boost(tier - 1))
 		boost_tier = tier
 		if audio:
 			audio.boost()
@@ -263,7 +281,7 @@ func give_item(name: String) -> bool:
 func add_coin() -> void:
 	coins += 1
 	coin_bonus = minf(COIN_CAP, coin_bonus + COIN_BONUS)
-	speed = minf(BOOST_MAX, speed + 1.2)
+	speed = minf(BOOST_MAX * stat_speed, speed + 1.2)
 	if audio: audio.coin()
 
 
@@ -294,8 +312,8 @@ func _respawn() -> void:
 func _update_audio() -> void:
 	if not audio:
 		return
-	audio.set_engine(clampf(speed / BOOST_MAX, 0.0, 1.0))
-	audio.set_drift(drifting, clampf(drift_charge / MINI_TIERS[2], 0.0, 1.0))
+	audio.set_engine(clampf(speed / (BOOST_MAX * stat_speed), 0.0, 1.0))
+	audio.set_drift(drifting, clampf(drift_charge / _tier_thresh(2), 0.0, 1.0))
 
 
 func _apply_model_transform(steer: float, delta: float) -> void:
@@ -309,11 +327,11 @@ func _apply_model_transform(steer: float, delta: float) -> void:
 
 	# drift spark colours by tier
 	if _spark_mat:
-		var t := clampf(drift_charge / MINI_TIERS[2], 0.0, 1.0)
+		var t := clampf(drift_charge / _tier_thresh(2), 0.0, 1.0)
 		var col := Color(1, 1, 1)
-		if drift_charge >= MINI_TIERS[1]:
+		if drift_charge >= _tier_thresh(1):
 			col = Color(0.4, 0.7, 1.0)
-		elif drift_charge >= MINI_TIERS[0]:
+		elif drift_charge >= _tier_thresh(0):
 			col = Color(1.0, 0.6, 0.15)
 		_spark_mat.albedo_color = col
 		_spark_mat.emission = col
@@ -416,7 +434,7 @@ func _update_camera(delta: float, steer: float) -> void:
 	_cam.look_at(position + f * 3.0 + Vector3(0, 1.0, 0), Vector3.UP)
 	var roll := -(steer * 0.10 + (drift_dir * 0.10 if drifting else 0.0))
 	_cam.rotate_object_local(Vector3(0, 0, 1), roll)
-	var ratio := clampf(speed / BOOST_MAX, 0.0, 1.0)
+	var ratio := clampf(speed / (BOOST_MAX * stat_speed), 0.0, 1.0)
 	var fov_target := lerpf(68.0, 86.0, ratio) + (6.0 if boost_time > 0.0 else 0.0)
 	_cam.fov = lerpf(_cam.fov, fov_target, k)
 
