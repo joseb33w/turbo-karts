@@ -1,13 +1,16 @@
 extends Node
-## Procedural sound for Turbo Karts. All audio is synthesized into AudioStreamWAV
-## at runtime (no binary assets) so the export .pck stays tiny. The engine is a
-## seamless looping tone whose pitch_scale rises with speed (the "whoosh"); drift
-## is a looping hiss whose volume tracks the boost charge.
+## Procedural sound for Turbo Karts. Everything is synthesized into AudioStreamWAV at
+## runtime (no binary assets) so the export .pck stays tiny. The engine is a seamless
+## looping tone whose pitch_scale rises with speed; drift is a looping hiss; and there's
+## now a seamless 16-second music bed (bass + pad + arpeggio + kick + hats) plus lap and
+## finish stingers. Loops are kept click-free by quantizing every tone to a whole number
+## of cycles over the loop length.
 
 const MIX := 22050
 
 var _engine: AudioStreamPlayer
 var _drift: AudioStreamPlayer
+var _music: AudioStreamPlayer
 var _pool: Array[AudioStreamPlayer] = []
 var _pool_i := 0
 
@@ -17,21 +20,28 @@ var _s_item: AudioStreamWAV
 var _s_hit: AudioStreamWAV
 var _s_beep: AudioStreamWAV
 var _s_go: AudioStreamWAV
+var _s_lap: AudioStreamWAV
+var _s_fanfare: AudioStreamWAV
 
 var _engine_on := false
+var _music_on := false
 
 
 func _ready() -> void:
 	_engine = AudioStreamPlayer.new()
 	_engine.stream = _build_engine()
 	_engine.volume_db = -10.0
-	_engine.bus = "Master"
 	add_child(_engine)
 
 	_drift = AudioStreamPlayer.new()
-	_drift.stream = _build_noise_loop(0.3, 1600.0)
+	_drift.stream = _build_noise_loop(0.3, 1700.0)
 	_drift.volume_db = -60.0
 	add_child(_drift)
+
+	_music = AudioStreamPlayer.new()
+	_music.stream = _build_music()
+	_music.volume_db = -16.0
+	add_child(_music)
 
 	for i in 6:
 		var p := AudioStreamPlayer.new()
@@ -44,6 +54,8 @@ func _ready() -> void:
 	_s_hit = _build_hit()
 	_s_beep = _build_tone(700.0, 0.12, 0.0)
 	_s_go = _build_tone(1050.0, 0.34, 9.0)
+	_s_lap = _build_arp([784.0, 1047.0, 1568.0], 0.3)
+	_s_fanfare = _build_fanfare()
 
 
 func start_engine() -> void:
@@ -53,19 +65,31 @@ func start_engine() -> void:
 		_engine_on = true
 
 
+func start_music() -> void:
+	if not _music_on:
+		_music.play()
+		_music_on = true
+
+
+func stop_music() -> void:
+	if _music_on:
+		_music.stop()
+		_music_on = false
+
+
 func set_engine(speed_ratio: float) -> void:
 	if not _engine_on:
 		return
 	_engine.pitch_scale = clampf(0.7 + speed_ratio * 1.7, 0.6, 2.6)
-	_engine.volume_db = lerpf(-16.0, -6.0, clampf(speed_ratio, 0.0, 1.0))
+	_engine.volume_db = lerpf(-15.0, -5.0, clampf(speed_ratio, 0.0, 1.0))
 
 
 func set_drift(active: bool, charge: float) -> void:
 	if not _engine_on:
 		return
-	var target := -60.0 if not active else lerpf(-26.0, -10.0, clampf(charge, 0.0, 1.0))
+	var target := -60.0 if not active else lerpf(-24.0, -9.0, clampf(charge, 0.0, 1.0))
 	_drift.volume_db = lerpf(_drift.volume_db, target, 0.25)
-	_drift.pitch_scale = 0.8 + charge * 0.8
+	_drift.pitch_scale = 0.8 + charge * 0.9
 
 
 func boost() -> void:
@@ -85,6 +109,12 @@ func beep() -> void:
 
 func go() -> void:
 	_play(_s_go, 0.0)
+
+func lap() -> void:
+	_play(_s_lap, -1.0)
+
+func fanfare() -> void:
+	_play(_s_fanfare, 0.0)
 
 
 func _play(stream: AudioStreamWAV, vol_db: float) -> void:
@@ -122,12 +152,14 @@ func _build_engine() -> AudioStreamWAV:
 	s.resize(n)
 	for i in n:
 		var t := float(i) / MIX
-		var v := 0.5 * sin(TAU * base * t)
+		var v := 0.46 * sin(TAU * base * t)
 		v += 0.30 * sin(TAU * base * 2.0 * t + 0.4)
-		v += 0.16 * sin(TAU * base * 3.0 * t)
+		v += 0.18 * sin(TAU * base * 3.0 * t)
+		v += 0.11 * sin(TAU * base * 4.0 * t + 0.8)
+		v += 0.07 * sin(TAU * base * 6.0 * t)
 		var ph := fposmod(base * 4.0 * t, 1.0)
-		v += 0.10 * (ph * 2.0 - 1.0)
-		s[i] = v * 0.7
+		v += 0.08 * (ph * 2.0 - 1.0)
+		s[i] = v * 0.62
 	return _wav(s, true)
 
 
@@ -144,6 +176,65 @@ func _build_noise_loop(dur: float, cutoff: float) -> AudioStreamWAV:
 		prev = lerpf(prev, white, a)
 		s[i] = prev * 0.8
 	return _wav(s, true)
+
+
+func _build_music() -> AudioStreamWAV:
+	var bpm := 120.0
+	var beat := 60.0 / bpm
+	var bars := 8
+	var dur := float(bars) * 4.0 * beat   # 16.0 s
+	var n := int(MIX * dur)
+	var f0 := 1.0 / dur                    # fundamental: every tone is a whole multiple
+	var tonic := 220.0
+	var roots := [0, 7, 9, 5, 0, 7, 9, 5]  # I V vi IV, twice
+	var arp_steps := [0, 7, 12, 7]
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 4242
+	var s := PackedFloat32Array()
+	s.resize(n)
+	for i in n:
+		var t := float(i) / MIX
+		var bar: int = int(t / (beat * 4.0)) % bars
+		var root: int = roots[bar]
+		var rf := _q(tonic * pow(2.0, float(root) / 12.0), f0)
+
+		# bass — root an octave down, soft square
+		var bf := rf * 0.5
+		var bass := (0.6 * sin(TAU * bf * t) + 0.18 * sin(TAU * _q(bf * 3.0, f0) * t)) * 0.16
+
+		# pad — root + fifth + octave (no thirds, always consonant)
+		var p5 := _q(tonic * pow(2.0, float(root + 7) / 12.0), f0)
+		var p8 := _q(rf * 2.0, f0)
+		var pad := (sin(TAU * rf * t) + sin(TAU * p5 * t) + sin(TAU * p8 * t)) * 0.038
+
+		# arpeggio — eighth notes
+		var e8: int = int(t / (beat * 0.5))
+		var astep: int = arp_steps[e8 % arp_steps.size()]
+		var af := _q(tonic * 2.0 * pow(2.0, float(root + astep) / 12.0), f0)
+		var alt := t - float(e8) * beat * 0.5
+		var aenv := exp(-alt * 7.0) * minf(1.0, alt * 80.0)
+		var arp := sin(TAU * af * t) * aenv * 0.10
+
+		# kick on beats 1 & 3
+		var bnum: int = int(t / beat)
+		var lt := t - float(bnum) * beat
+		var kick := 0.0
+		if bnum % 2 == 0:
+			var kf := lerpf(120.0, 45.0, clampf(lt * 12.0, 0.0, 1.0))
+			kick = sin(TAU * kf * t) * exp(-lt * 16.0) * 0.5
+
+		# hats on offbeats
+		var hat := 0.0
+		var half := alt
+		if e8 % 2 == 1:
+			hat = rng.randf_range(-1.0, 1.0) * exp(-half * 60.0) * 0.06
+
+		s[i] = clampf((bass + pad + arp + kick + hat) * 0.9, -1.0, 1.0)
+	return _wav(s, true)
+
+
+func _q(freq: float, f0: float) -> float:
+	return maxf(f0, round(freq / f0) * f0)
 
 
 func _build_boost() -> AudioStreamWAV:
@@ -190,6 +281,27 @@ func _build_arp(freqs: Array, dur: float) -> AudioStreamWAV:
 		var lt := t - float(idx) * seg
 		var env := exp(-lt * 10.0) * minf(1.0, lt * 60.0)
 		s[i] = sin(TAU * f * t) * env * 0.7
+	return _wav(s, false)
+
+
+func _build_fanfare() -> AudioStreamWAV:
+	var notes := [523.0, 659.0, 784.0, 1047.0, 1047.0, 1319.0]
+	var times := [0.0, 0.12, 0.24, 0.36, 0.36, 0.62]
+	var dur := 1.1
+	var n := int(MIX * dur)
+	var s := PackedFloat32Array()
+	s.resize(n)
+	for i in n:
+		var t := float(i) / MIX
+		var v := 0.0
+		for k in notes.size():
+			var nt: float = times[k]
+			if t >= nt:
+				var lt := t - nt
+				var env := exp(-lt * 3.5) * minf(1.0, lt * 50.0)
+				v += sin(TAU * float(notes[k]) * t) * env * 0.3
+				v += sin(TAU * float(notes[k]) * 2.0 * t) * env * 0.08
+		s[i] = clampf(v, -1.0, 1.0)
 	return _wav(s, false)
 
 

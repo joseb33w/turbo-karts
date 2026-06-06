@@ -57,6 +57,7 @@ var _last_good_offset := 0.0
 
 var _model: Node3D
 var _body: MeshInstance3D
+var _wheels: Array = []
 var _cam: Camera3D
 var _cam_ready := false
 var _boost_fx: CPUParticles3D
@@ -77,6 +78,9 @@ func setup(track_ref: Node3D, audio_ref: Node, game_ref: Node, kart_def: Diction
 	var built: Dictionary = KartBuildC.build_def(kart_def)
 	_model = built["root"]
 	_body = built["body"]
+	var ws: Variant = built.get("wheels", [])
+	if ws is Array:
+		_wheels = ws
 	add_child(_model)
 	_build_fx()
 
@@ -140,7 +144,15 @@ func _process(delta: float) -> void:
 	_drive(delta, steer, drift_held, on_grass, surface_y)
 	_update_audio()
 	_apply_model_transform(steer, delta)
+	_roll_wheels(delta)
 	_update_camera(delta, steer)
+
+
+func _roll_wheels(delta: float) -> void:
+	var roll := speed * delta * 3.0
+	for w: Variant in _wheels:
+		if w is Node3D:
+			(w as Node3D).rotate_x(roll)
 
 
 func _drive(delta: float, steer: float, drift_held: bool, on_grass: bool, surface_y: float) -> void:

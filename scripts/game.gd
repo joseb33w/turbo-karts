@@ -7,6 +7,7 @@ extends Node3D
 const TrackScript := preload("res://scripts/track.gd")
 const KartScript := preload("res://scripts/kart.gd")
 const RemoteScript := preload("res://scripts/remote_kart.gd")
+const AIScript := preload("res://scripts/ai_kart.gd")
 const HudScript := preload("res://scripts/hud.gd")
 const AudioScript := preload("res://scripts/audio.gd")
 const KartBuildC := preload("res://scripts/kart_build.gd")
@@ -14,17 +15,21 @@ const KartBuildC := preload("res://scripts/kart_build.gd")
 const ITEM_POOL := ["mushroom", "mushroom", "banana", "shell", "shell"]
 const SHELL_SPEED := 46.0
 const BROADCAST_HZ := 0.1
+const AI_NAMES := ["Blaze", "Nyx", "Rusty", "Volt", "Coco", "Zip", "Bolt", "Pixel", "Suki", "Rex", "Juno", "Kit"]
+const AI_STYLES := ["classic", "sport", "drift", "heavy", "gt"]
 
 signal exited()
 
 var arena_spec: Dictionary = {}
 var kart_def: Dictionary = {}
+var ai_count := 5
 
 var track
 var kart
 var hud
 var audio
 var _cam: Camera3D
+var _ai: Array = []
 
 var arena_id := "bay"
 var total_laps := 3
@@ -83,6 +88,7 @@ func _ready() -> void:
 
 	_spawn_pickups()
 	_place_grid()
+	_spawn_ai()
 	hud.set_item("")
 	hud.set_best(0.0)
 
@@ -99,6 +105,7 @@ func begin() -> void:
 	best_lap = Profile.best_lap_ms(arena_id) / 1000.0
 	hud.set_best(best_lap)
 	audio.start_engine()
+	audio.start_music()
 	_push_arena_to_url()
 
 	Net.connected.connect(_on_connected)
@@ -116,8 +123,47 @@ func _push_arena_to_url() -> void:
 
 
 func _place_grid() -> void:
-	var grid: Array = track.grid_transforms(1)
+	var grid: Array = track.grid_transforms(1 + ai_count)
 	kart.place_at(grid[0])
+
+
+func _spawn_ai() -> void:
+	var grid: Array = track.grid_transforms(1 + ai_count)
+	var names := AI_NAMES.duplicate()
+	names.shuffle()
+	for i in ai_count:
+		var t: Dictionary = grid[i + 1]
+		var off: float = track.probe(t["pos"])["offset"]
+		var lane := _lane_of(t["pos"], off)
+		var skill := clampf(0.42 + 0.46 * (float(i) / maxf(1.0, float(ai_count - 1))) + randf_range(-0.06, 0.06), 0.28, 0.96)
+		var ai = AIScript.new()
+		add_child(ai)
+		ai.setup(track, {
+			"name": names[i % names.size()],
+			"color": KartBuildC.color_for("cpu_%d_%s" % [i, arena_id]),
+			"style": AI_STYLES[i % AI_STYLES.size()],
+			"skill": skill,
+			"laps": total_laps,
+			"offset": off,
+			"lane": lane,
+			"seed": 1000 + i * 7,
+		})
+		_ai.append(ai)
+
+
+func _lane_of(pos: Vector3, off: float) -> float:
+	var c: Vector3 = track.sample(off)
+	var dir: Vector3 = track.tangent_at(off)
+	var nrm := Vector3(-dir.z, 0.0, dir.x)
+	return (pos - c).dot(nrm)
+
+
+func _update_ai(delta: float) -> void:
+	if _ai.is_empty():
+		return
+	var pp: float = kart.race_progress() if kart else 0.0
+	for ai in _ai:
+		ai.update(delta, pp)
 
 
 func _start_countdown() -> void:
@@ -151,11 +197,15 @@ func _begin_race() -> void:
 	_lap_start = 0.0
 	_last_frac = kart.track_offset / track.length
 	_halfway = false
+	for ai in _ai:
+		ai.racing = true
 
 
 func reset_race() -> void:
 	hud.hide_finish()
 	_place_grid()
+	for ai in _ai:
+		ai.reset_grid()
 	_start_countdown()
 
 
@@ -174,6 +224,7 @@ func _process(delta: float) -> void:
 		_check_pickups()
 		_check_lap()
 
+	_update_ai(delta)
 	_update_bananas(delta)
 	_update_shells(delta)
 	_update_remotes()
@@ -200,6 +251,7 @@ func _on_lap_crossed() -> void:
 	if laps_completed >= total_laps:
 		_finish_race()
 	else:
+		audio.lap()
 		hud.flash("LAP %d" % (laps_completed + 1))
 
 
@@ -214,7 +266,39 @@ func _finish_race() -> void:
 	var earned: int = collected * 10 + placement_bonus
 	var lap_ms := int(round(best_lap * 1000.0)) if best_lap > 0.0 else 0
 	Profile.bank(earned, arena_id, lap_ms)
+	audio.fanfare()
+	_burst_confetti()
 	hud.show_finish(finish_placement, entries, race_time, best_lap, earned, collected, placement_bonus, Profile.coins)
+
+
+func _burst_confetti() -> void:
+	var colors := [Color(1.0, 0.3, 0.3), Color(0.3, 0.7, 1.0), Color(1.0, 0.85, 0.2), Color(0.4, 0.9, 0.5), Color(0.8, 0.4, 0.95)]
+	for i in colors.size():
+		var p := CPUParticles3D.new()
+		p.amount = 26
+		p.lifetime = 2.2
+		p.one_shot = true
+		p.explosiveness = 0.7
+		p.local_coords = false
+		p.direction = Vector3(0, 1, 0)
+		p.spread = 55.0
+		p.initial_velocity_min = 7.0
+		p.initial_velocity_max = 13.0
+		p.gravity = Vector3(0, -9.0, 0)
+		p.angular_velocity_min = -360.0
+		p.angular_velocity_max = 360.0
+		p.scale_amount_min = 0.18
+		p.scale_amount_max = 0.32
+		var bm := BoxMesh.new()
+		bm.size = Vector3(0.3, 0.06, 0.4)
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = colors[i]
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		bm.material = mat
+		p.mesh = bm
+		add_child(p)
+		p.global_position = kart.position + Vector3(0, 2.0, 0)
+		p.emitting = true
 
 
 func _placement_bonus(p: int) -> int:
@@ -314,6 +398,12 @@ func _update_bananas(delta: float) -> void:
 		if not dead and b["arm"] <= 0.0 and kart.position.distance_to(b["pos"]) < 1.5:
 			kart.spin_out()
 			dead = true
+		if not dead and b["arm"] <= 0.0:
+			for ai in _ai:
+				if ai.position.distance_to(b["pos"]) < 1.6:
+					ai.hit()
+					dead = true
+					break
 		if dead:
 			n.queue_free()
 		else:
@@ -345,6 +435,13 @@ func _update_shells(delta: float) -> void:
 				audio.hit()
 				dead = true
 				break
+		if not dead:
+			for ai in _ai:
+				if pos.distance_to(ai.position) < 2.8:
+					ai.hit()
+					audio.hit()
+					dead = true
+					break
 		if dead:
 			n.queue_free()
 		else:
@@ -408,7 +505,7 @@ func _broadcast(delta: float) -> void:
 # ---------------------------------------------------------------- positions + hud
 
 func _entry_count() -> int:
-	return 1 + _remotes.size()
+	return 1 + _remotes.size() + _ai.size()
 
 
 func _compute_position() -> int:
@@ -417,6 +514,9 @@ func _compute_position() -> int:
 	for id: String in _remotes:
 		var rk = _remotes[id]
 		if rk.prog > my_prog:
+			ahead += 1
+	for ai in _ai:
+		if ai.prog > my_prog:
 			ahead += 1
 	return ahead + 1
 
@@ -434,5 +534,7 @@ func _update_hud() -> void:
 	for id: String in _remotes:
 		var rk = _remotes[id]
 		rows.append({"name": rk.pname, "color": KartBuildC.color_for(id), "prog": rk.prog, "me": false})
+	for ai in _ai:
+		rows.append({"name": ai.pname, "color": ai.color, "prog": ai.prog, "me": false})
 	rows.sort_custom(func(a, b): return float(a["prog"]) > float(b["prog"]))
 	hud.set_board(rows)
