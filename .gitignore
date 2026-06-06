@@ -3,6 +3,9 @@
 /out/
 export_presets.cfg.bak
 
+# Secrets (the anon key is baked into web/bridge.js for the web build)
+.env
+
 # Verification tooling (never committed to the game repo)
 verify/
 
