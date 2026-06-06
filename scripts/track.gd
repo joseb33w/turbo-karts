@@ -1,12 +1,17 @@
 extends Node3D
-## Procedural looping race circuit. A closed Catmull-Rom curve defines the
-## centerline; road / kerb / checker meshes are generated from it. The kart asks
-## this node where the road is (closest offset, lateral distance, surface height,
-## tangent) instead of using mesh collision - robust and cheap for arcade karts.
+## Procedural looping race circuit, built from an arena spec (see arenas.gd). A closed
+## Catmull-Rom curve from the spec's control points defines the centerline; road / kerb
+## / checker meshes are generated from it, themed per arena (sky, sun, ground, kerbs,
+## fog, water, decor). The kart asks this node where the road is (closest offset,
+## lateral distance, surface height, tangent) instead of using mesh collision.
 
 const HALF_WIDTH := 7.0
 const GRASS_MARGIN := 6.5            # drivable grass beyond the road edge
 const SHORTCUT_HALF := 3.2
+
+var spec: Dictionary = {}
+var theme: Dictionary = {}
+var laps := 3
 
 var curve := Curve3D.new()
 var length := 0.0
@@ -18,22 +23,11 @@ var _shortcut_a := Vector3.ZERO
 var _shortcut_b := Vector3.ZERO
 var _shortcut_active := false
 
-const CONTROL := [
-	Vector3(0, 0, -62),
-	Vector3(48, 0, -74),
-	Vector3(92, 1.5, -46),
-	Vector3(98, 4.5, 4),
-	Vector3(74, 6.0, 46),
-	Vector3(32, 2.0, 62),
-	Vector3(-16, 0, 66),
-	Vector3(-62, 0, 48),
-	Vector3(-92, 0, 6),
-	Vector3(-78, 0, -36),
-	Vector3(-36, 0, -58),
-]
 
-
-func build() -> void:
+func build(arena: Dictionary) -> void:
+	spec = arena
+	theme = arena.get("theme", {})
+	laps = int(arena.get("laps", 3))
 	_build_curve()
 	length = curve.get_baked_length()
 	_define_features()
@@ -45,19 +39,24 @@ func build() -> void:
 	_build_decor()
 
 
+func _control() -> Array:
+	return spec.get("control", [])
+
+
 func _build_curve() -> void:
 	curve.bake_interval = 0.6
-	var m := CONTROL.size()
+	var ctrl := _control()
+	var m := ctrl.size()
 	var steps := 14
 	for i in m:
-		var p0: Vector3 = CONTROL[(i - 1 + m) % m]
-		var p1: Vector3 = CONTROL[i]
-		var p2: Vector3 = CONTROL[(i + 1) % m]
-		var p3: Vector3 = CONTROL[(i + 2) % m]
+		var p0: Vector3 = ctrl[(i - 1 + m) % m]
+		var p1: Vector3 = ctrl[i]
+		var p2: Vector3 = ctrl[(i + 1) % m]
+		var p3: Vector3 = ctrl[(i + 2) % m]
 		for s in steps:
 			var t := float(s) / float(steps)
 			curve.add_point(_catmull(p0, p1, p2, p3, t))
-	curve.add_point(CONTROL[0])
+	curve.add_point(ctrl[0])
 
 
 func _catmull(p0: Vector3, p1: Vector3, p2: Vector3, p3: Vector3, t: float) -> Vector3:
@@ -67,7 +66,6 @@ func _catmull(p0: Vector3, p1: Vector3, p2: Vector3, p3: Vector3, t: float) -> V
 
 
 func _define_features() -> void:
-	# A jump ramp on the long approach and one before the hill.
 	for off: float in [length * 0.16, length * 0.45]:
 		var pos := curve.sample_baked(off)
 		var dir := tangent_at(off)
@@ -79,10 +77,10 @@ func _define_features() -> void:
 	for i in 30:
 		coin_specs.append({"offset": fmod(length * (0.04 + 0.032 * float(i)), length), "side": (-1.0 if i % 2 == 0 else 1.0) * (1.0 if i % 4 < 2 else 2.4)})
 
-	# Shortcut: a narrow chord cutting across the wide right-hand sweep.
-	_shortcut_a = curve.sample_baked(length * 0.60)
-	_shortcut_b = curve.sample_baked(length * 0.72)
-	_shortcut_active = true
+	if bool(theme.get("shortcut", false)):
+		_shortcut_a = curve.sample_baked(length * 0.60)
+		_shortcut_b = curve.sample_baked(length * 0.72)
+		_shortcut_active = true
 
 
 func tangent_at(offset: float) -> Vector3:
@@ -164,10 +162,12 @@ func _mat(c: Color, rough := 0.9, emit := 0.0) -> StandardMaterial3D:
 	return m
 
 
-func _vcolor_mat() -> StandardMaterial3D:
+func _vcolor_mat(unshaded := false) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.vertex_color_use_as_albedo = true
 	m.roughness = 0.9
+	if unshaded:
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	return m
 
 
@@ -177,43 +177,45 @@ func _build_environment() -> void:
 	env.background_mode = Environment.BG_SKY
 	var sky := Sky.new()
 	var psm := ProceduralSkyMaterial.new()
-	psm.sky_top_color = Color(0.25, 0.6, 1.0)
-	psm.sky_horizon_color = Color(0.7, 0.88, 1.0)
-	psm.ground_horizon_color = Color(0.7, 0.88, 1.0)
-	psm.ground_bottom_color = Color(0.5, 0.7, 0.9)
-	psm.sun_angle_max = 30.0
+	psm.sky_top_color = theme.get("sky_top", Color(0.25, 0.6, 1.0))
+	psm.sky_horizon_color = theme.get("sky_horizon", Color(0.7, 0.88, 1.0))
+	psm.ground_horizon_color = theme.get("ground_horizon", Color(0.7, 0.88, 1.0))
+	psm.ground_bottom_color = theme.get("ground_bottom", Color(0.5, 0.7, 0.9))
+	psm.sun_angle_max = float(theme.get("sun_angle", 30.0))
 	sky.sky_material = psm
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	env.ambient_light_energy = 1.1
-	env.fog_enabled = true
-	env.fog_light_color = Color(0.7, 0.86, 1.0)
-	env.fog_density = 0.0016
+	env.ambient_light_energy = float(theme.get("ambient", 1.1))
+	if bool(theme.get("fog", true)):
+		env.fog_enabled = true
+		env.fog_light_color = theme.get("fog_color", Color(0.7, 0.86, 1.0))
+		env.fog_density = float(theme.get("fog_density", 0.0016))
 	we.environment = env
 	add_child(we)
 
 	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-52, -48, 0)
-	sun.light_energy = 1.15
-	sun.light_color = Color(1.0, 0.97, 0.9)
+	sun.rotation_degrees = theme.get("sun_rot", Vector3(-52, -48, 0))
+	sun.light_energy = float(theme.get("sun_energy", 1.15))
+	sun.light_color = theme.get("sun_color", Color(1.0, 0.97, 0.9))
 	sun.shadow_enabled = false
 	add_child(sun)
 
-	var water := MeshInstance3D.new()
-	var wp := PlaneMesh.new()
-	wp.size = Vector2(2000, 2000)
-	water.mesh = wp
-	water.material_override = _mat(Color(0.30, 0.62, 0.85), 0.3)
-	water.position = Vector3(0, -5.0, 0)
-	add_child(water)
+	if bool(theme.get("water", false)):
+		var water := MeshInstance3D.new()
+		var wp := PlaneMesh.new()
+		wp.size = Vector2(2000, 2000)
+		water.mesh = wp
+		water.material_override = _mat(theme.get("water_color", Color(0.30, 0.62, 0.85)), 0.3)
+		water.position = Vector3(0, float(theme.get("water_y", -5.0)), 0)
+		add_child(water)
 
-	var grass := MeshInstance3D.new()
+	var ground := MeshInstance3D.new()
 	var gp := PlaneMesh.new()
-	gp.size = Vector2(420, 420)
-	grass.mesh = gp
-	grass.material_override = _mat(Color(0.36, 0.72, 0.34))
-	grass.position = Vector3(0, -0.05, 0)
-	add_child(grass)
+	gp.size = Vector2(640, 640)
+	ground.mesh = gp
+	ground.material_override = _mat(theme.get("ground", Color(0.36, 0.72, 0.34)))
+	ground.position = Vector3(0, -0.05, 0)
+	add_child(ground)
 
 
 func _build_road() -> void:
@@ -236,7 +238,7 @@ func _build_road() -> void:
 	st.generate_normals()
 	var mi := MeshInstance3D.new()
 	mi.mesh = st.commit()
-	mi.material_override = _mat(Color(0.28, 0.29, 0.34))
+	mi.material_override = _mat(theme.get("road", Color(0.28, 0.29, 0.34)))
 	add_child(mi)
 
 
@@ -246,6 +248,9 @@ func _build_kerbs() -> void:
 	var n := 200
 	var inner := HALF_WIDTH
 	var outer := HALF_WIDTH + 0.8
+	var emit := float(theme.get("kerb_emit", 0.0))
+	var ca: Color = theme.get("kerb_a", Color(0.92, 0.2, 0.2))
+	var cb: Color = theme.get("kerb_b", Color(0.96, 0.96, 0.96))
 	for side: float in [-1.0, 1.0]:
 		var pl := Vector3.ZERO
 		var po := Vector3.ZERO
@@ -257,13 +262,13 @@ func _build_kerbs() -> void:
 			var a := c + nrm * inner + Vector3(0, 0.06, 0)
 			var b := c + nrm * outer + Vector3(0, 0.06, 0)
 			if i > 0:
-				var col := Color(0.92, 0.2, 0.2) if i % 2 == 0 else Color(0.96, 0.96, 0.96)
+				var col := ca if i % 2 == 0 else cb
 				_quad_c(st, pl, a, b, po, col)
 			pl = a
 			po = b
 	var mi := MeshInstance3D.new()
 	mi.mesh = st.commit()
-	mi.material_override = _vcolor_mat()
+	mi.material_override = _vcolor_mat(emit > 0.0)
 	add_child(mi)
 
 
@@ -304,26 +309,32 @@ func _build_ramps() -> void:
 		var pm := PrismMesh.new()
 		pm.size = Vector3(2.0 * HALF_WIDTH - 1.0, 1.6, 5.0)
 		ramp.mesh = pm
-		ramp.material_override = _mat(Color(1.0, 0.62, 0.2), 0.5)
+		ramp.material_override = _mat(Color(1.0, 0.62, 0.2), 0.5, 0.4 if float(theme.get("kerb_emit", 0.0)) > 0.0 else 0.0)
 		ramp.position = pos + Vector3(0, 0.8, 0)
 		ramp.rotation.y = atan2(dir.x, dir.z)
-		ramp.rotation_degrees.y += 0.0
 		add_child(ramp)
 
 
 func _build_decor() -> void:
+	var kind := str(theme.get("decor", "trees"))
+	if kind == "none":
+		return
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 4242
-	for i in 26:
-		var off := length * float(i) / 26.0 + rng.randf_range(-4.0, 4.0)
+	var count := 26
+	for i in count:
+		var off := length * float(i) / float(count) + rng.randf_range(-4.0, 4.0)
 		var c := curve.sample_baked(fposmod(off, length))
 		var dir := tangent_at(off)
 		var nrm := Vector3(-dir.z, 0, dir.x)
 		var side := 1.0 if i % 2 == 0 else -1.0
-		var dist := HALF_WIDTH + GRASS_MARGIN + rng.randf_range(2.0, 9.0)
+		var dist := HALF_WIDTH + GRASS_MARGIN + rng.randf_range(2.0, 10.0)
 		var base := c + nrm * side * dist
 		base.y = 0.0
-		_make_tree(base, rng)
+		match kind:
+			"cacti": _make_cactus(base, rng)
+			"city": _make_building(base, rng)
+			_: _make_tree(base, rng)
 
 
 func _make_tree(base: Vector3, rng: RandomNumberGenerator) -> void:
@@ -346,6 +357,57 @@ func _make_tree(base: Vector3, rng: RandomNumberGenerator) -> void:
 	leaf.material_override = _mat(Color(0.2, g, 0.28))
 	leaf.position = base + Vector3(0, 2.6, 0)
 	add_child(leaf)
+
+
+func _make_cactus(base: Vector3, rng: RandomNumberGenerator) -> void:
+	var col := Color(0.20, 0.52, 0.28)
+	var mat := _mat(col)
+	var h := rng.randf_range(2.2, 3.6)
+	var trunk := MeshInstance3D.new()
+	var tm := CapsuleMesh.new()
+	tm.radius = 0.45
+	tm.height = h
+	tm.radial_segments = 8
+	tm.rings = 3
+	trunk.mesh = tm
+	trunk.material_override = mat
+	trunk.position = base + Vector3(0, h * 0.5, 0)
+	add_child(trunk)
+	for s: float in [-1.0, 1.0]:
+		if rng.randf() < 0.4:
+			continue
+		var arm := MeshInstance3D.new()
+		var am := CapsuleMesh.new()
+		am.radius = 0.28
+		am.height = 1.3
+		am.radial_segments = 6
+		am.rings = 2
+		arm.mesh = am
+		arm.material_override = mat
+		arm.rotation.z = s * 1.0
+		arm.position = base + Vector3(s * 0.6, h * 0.6, 0)
+		add_child(arm)
+
+
+func _make_building(base: Vector3, rng: RandomNumberGenerator) -> void:
+	var h := rng.randf_range(8.0, 22.0)
+	var w := rng.randf_range(4.0, 8.0)
+	var body := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(w, h, w)
+	body.mesh = bm
+	body.material_override = _mat(Color(0.05, 0.05, 0.09), 0.6)
+	body.position = base + Vector3(0, h * 0.5, 0)
+	add_child(body)
+	var neon := MeshInstance3D.new()
+	var nm := BoxMesh.new()
+	nm.size = Vector3(w + 0.2, 0.5, w + 0.2)
+	neon.mesh = nm
+	var palette := [Color(0.1, 0.95, 1.0), Color(1.0, 0.2, 0.85), Color(0.7, 0.4, 1.0), Color(1.0, 0.8, 0.2)]
+	var nc: Color = palette[rng.randi() % palette.size()]
+	neon.material_override = _mat(nc, 0.4, 2.6)
+	neon.position = base + Vector3(0, h - rng.randf_range(1.0, 3.0), 0)
+	add_child(neon)
 
 
 func _quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> void:

@@ -1,7 +1,8 @@
 extends Node3D
-## Race orchestrator: builds the world, runs the countdown + lap/timer/position
+## Race orchestrator: builds the chosen arena, runs the countdown + lap/timer/position
 ## logic, manages item boxes / coins / bananas / shells, syncs peers over Supabase
-## Realtime broadcast, and drives the HUD.
+## Realtime broadcast, banks coins into the persistent profile on finish, and drives
+## the HUD. Configure `arena_spec` + `kart_def` before adding this node to the tree.
 
 const TrackScript := preload("res://scripts/track.gd")
 const KartScript := preload("res://scripts/kart.gd")
@@ -10,16 +11,24 @@ const HudScript := preload("res://scripts/hud.gd")
 const AudioScript := preload("res://scripts/audio.gd")
 const KartBuildC := preload("res://scripts/kart_build.gd")
 
-const TOTAL_LAPS := 3
 const ITEM_POOL := ["mushroom", "mushroom", "banana", "shell", "shell"]
 const SHELL_SPEED := 46.0
 const BROADCAST_HZ := 0.1
+
+signal exited()
+
+var arena_spec: Dictionary = {}
+var kart_def: Dictionary = {}
 
 var track
 var kart
 var hud
 var audio
 var _cam: Camera3D
+
+var arena_id := "bay"
+var total_laps := 3
+var player_color := Color(0.3, 0.8, 0.35)
 
 var player_name := "Racer"
 var laps_completed := 0
@@ -40,13 +49,20 @@ var _bananas: Array[Dictionary] = []
 var _shells: Array[Dictionary] = []
 var _send_accum := 0.0
 var _now := 0.0
-var _banana_seq := 0
 
 
 func _ready() -> void:
+	if arena_spec.is_empty():
+		arena_spec = Arenas.by_id("bay")
+	if kart_def.is_empty():
+		kart_def = Garage.by_id("starter")
+	arena_id = str(arena_spec.get("id", "bay"))
+	player_color = kart_def.get("color", player_color)
+
 	track = TrackScript.new()
 	add_child(track)
-	track.build()
+	track.build(arena_spec)
+	total_laps = track.laps
 
 	audio = AudioScript.new()
 	add_child(audio)
@@ -58,7 +74,7 @@ func _ready() -> void:
 
 	kart = KartScript.new()
 	add_child(kart)
-	kart.setup(track, audio, self, KartBuildC.color_for("me_local"))
+	kart.setup(track, audio, self, kart_def)
 	kart.attach_camera(_cam)
 
 	hud = HudScript.new()
@@ -70,21 +86,33 @@ func _ready() -> void:
 	hud.set_item("")
 	hud.set_best(0.0)
 
+	if Profile.updated.is_connected(_on_profile_updated) == false:
+		Profile.updated.connect(_on_profile_updated)
+
 
 func begin() -> void:
 	if started:
 		return
 	started = true
-	player_name = Net.display_name
-	best_lap = _load_best()
+	player_name = Profile.pname
+	Net.display_name = player_name
+	best_lap = Profile.best_lap_ms(arena_id) / 1000.0
 	hud.set_best(best_lap)
 	audio.start_engine()
+	_push_arena_to_url()
 
 	Net.connected.connect(_on_connected)
 	Net.message.connect(_on_message)
 	Net.connect_room()
 
 	_start_countdown()
+
+
+func _push_arena_to_url() -> void:
+	if not OS.has_feature("web"):
+		return
+	var js := "(function(){try{var u=new URLSearchParams(location.search);u.set('arena','%s');history.replaceState(null,'','?'+u.toString());}catch(e){}})()" % arena_id
+	JavaScriptBridge.eval(js, true)
 
 
 func _place_grid() -> void:
@@ -131,6 +159,10 @@ func reset_race() -> void:
 	_start_countdown()
 
 
+func exit_to_menu() -> void:
+	exited.emit()
+
+
 # ---------------------------------------------------------------- main loop
 
 func _process(delta: float) -> void:
@@ -164,9 +196,8 @@ func _on_lap_crossed() -> void:
 	_lap_start = race_time
 	if lap_time > 1.0 and (best_lap <= 0.0 or lap_time < best_lap):
 		best_lap = lap_time
-		_save_best(best_lap)
 	laps_completed += 1
-	if laps_completed >= TOTAL_LAPS:
+	if laps_completed >= total_laps:
 		_finish_race()
 	else:
 		hud.flash("LAP %d" % (laps_completed + 1))
@@ -177,7 +208,26 @@ func _finish_race() -> void:
 	racing = false
 	kart.finished = true
 	finish_placement = _compute_position()
-	hud.show_finish(finish_placement, _entry_count(), race_time, best_lap)
+	var entries := _entry_count()
+	var placement_bonus := _placement_bonus(finish_placement)
+	var collected: int = kart.coins
+	var earned: int = collected * 10 + placement_bonus
+	var lap_ms := int(round(best_lap * 1000.0)) if best_lap > 0.0 else 0
+	Profile.bank(earned, arena_id, lap_ms)
+	hud.show_finish(finish_placement, entries, race_time, best_lap, earned, collected, placement_bonus, Profile.coins)
+
+
+func _placement_bonus(p: int) -> int:
+	match p:
+		1: return 250
+		2: return 180
+		3: return 130
+		_: return 90
+
+
+func _on_profile_updated() -> void:
+	if hud:
+		hud.set_balance(Profile.coins)
 
 
 # ---------------------------------------------------------------- pickups
@@ -372,7 +422,7 @@ func _compute_position() -> int:
 
 
 func _update_hud() -> void:
-	hud.set_lap(laps_completed, TOTAL_LAPS)
+	hud.set_lap(laps_completed, total_laps)
 	hud.set_time(race_time)
 	hud.set_best(best_lap)
 	hud.set_coins(kart.coins)
@@ -380,25 +430,9 @@ func _update_hud() -> void:
 	hud.set_position(_compute_position(), _entry_count())
 
 	var rows: Array = []
-	rows.append({"name": player_name, "color": KartBuildC.color_for("me_local"), "prog": kart.race_progress(), "me": true})
+	rows.append({"name": player_name, "color": player_color, "prog": kart.race_progress(), "me": true})
 	for id: String in _remotes:
 		var rk = _remotes[id]
 		rows.append({"name": rk.pname, "color": KartBuildC.color_for(id), "prog": rk.prog, "me": false})
 	rows.sort_custom(func(a, b): return float(a["prog"]) > float(b["prog"]))
 	hud.set_board(rows)
-
-
-# ---------------------------------------------------------------- best-lap persistence
-
-func _load_best() -> float:
-	if OS.has_feature("web"):
-		var v: Variant = JavaScriptBridge.eval("window.localStorage.getItem('turbo_best')||''", true)
-		var s := str(v)
-		if s != "" and s.is_valid_float():
-			return float(s)
-	return 0.0
-
-
-func _save_best(v: float) -> void:
-	if OS.has_feature("web"):
-		JavaScriptBridge.eval("window.localStorage.setItem('turbo_best','%f')" % v, true)

@@ -1,35 +1,53 @@
 # Goal
-Build **Turbo Karts** - a bright, cartoony, low-poly **3D Mario-Kart-style racer in
-Godot 4.6.3**, exported to the web (single-threaded `nothreads`, Compatibility/WebGL2
-renderer) so it runs in mobile + desktop Safari/Chrome/Firefox. Auto-accelerate
-arcade handling: steer, **drift to charge a mini-turbo**, brake. Items from item
-boxes (boost mushroom, banana, shell), coins for a speed bonus. 3-lap race with a
-3-2-1-GO countdown, lap counter, lap timer + best lap, and a finish/placement screen.
-Fall off -> respawn. **Live multiplayer over Supabase Realtime broadcast** with a room
-code in the URL, remote karts with name tags, and a live position/leaderboard.
+Round 2 of **Turbo Karts**. Build on the shipped Godot 4.6.3 web racer:
+1. **Mobile default-browser playability** — verified to boot + play in a phone-sized
+   viewport (portrait + landscape), big touch targets, safe-area margins, brake button.
+2. **Better looks + better 3D UI** — a polished, themed menu/HUD/finish system with
+   rounded glass panels, a 3D rotating-kart showroom backdrop, animated countdown,
+   and per-arena skies/lighting.
+3. **Multiple race arenas** the player can choose from (distinct track shapes, skies,
+   ground, decor, fog/water, lap counts).
+4. **Points economy + garage** — collected coins bank into a persistent wallet used to
+   **buy faster vehicles**. Persistence is real (Supabase Postgres), not localStorage.
+
+# Backend (Supabase — verified)
+The shared project enforces email confirmation and disables anonymous sign-in, so a
+client-side email/password flow would strand casual players at a "check your inbox"
+wall (the forbidden round-trip). Instead the wallet/garage is a **server-authoritative
+profile** keyed by a per-device token (player_id + secret in localStorage, like a
+session token — the DATA lives in Postgres):
+- Table `public."usr_nmexs7bytxq2_turbo_karts_profiles"` — RLS on, **no anon grants**.
+- `SECURITY DEFINER` RPCs (granted to anon, secret-validated): `..._tk_login`,
+  `..._tk_bank` (add coins + record best lap), `..._tk_buy` (server-priced), `..._tk_select`.
+- Verified end-to-end with the anon key: create/persist, server-side pricing, insufficient
+  funds rejected, wrong-secret rejected, direct table SELECT blocked.
 
 # Files to touch
-- `project.godot` - Compatibility renderer, stretch, touch-mouse, `Net` autoload, input map (registered at runtime in `main.gd`).
-- `export_presets.cfg` - `Web` preset, `thread_support=false`, head_include + Supabase SDK CDN + `bridge.js`.
-- `main.gd` / `main.tscn` - input actions, tap-to-start (unlocks Web Audio), boots the Game.
-- `scripts/track.gd` - closed Catmull-Rom circuit; road/kerb/checker meshes; sky + decor; ramps; on-road/surface probe; item-box/coin/shortcut placement.
-- `scripts/kart.gd` - local kart physics, drift + mini-turbo, items, ramp launches, respawn, chase camera (tilts into turns), drift-spark / boost-trail particles, engine/boost/drift audio.
-- `scripts/kart_build.gd` - code-built low-poly kart model (per-player colour).
-- `scripts/remote_kart.gd` - interpolated peer kart + billboard name tag.
-- `scripts/items.gd` - item box / coin / banana / shell meshes.
-- `scripts/hud.gd` - lap/position/timer/best, item slot, coins, leaderboard, countdown, finish screen, touch controls.
-- `scripts/audio.gd` - procedural (synthesized) engine/boost/drift/coin/item/hit/countdown sound.
-- `net.gd` / `web/bridge.js` - Supabase Realtime broadcast transport (creds filled in).
+- `project.godot` — add `Profile` autoload.
+- `scripts/arenas.gd` (new) — 4 arena specs (control points + theme).
+- `scripts/garage.gd` (new) — kart catalog (stats multipliers, price, color, style).
+- `scripts/profile.gd` (new, autoload) — wallet/garage state; talks to the bridge RPCs.
+- `scripts/ui_theme.gd` (new) — shared polished UI styling helpers.
+- `scripts/menu.gd` (new) — tap-to-start → main menu, garage, arena select, 3D showroom.
+- `main.gd` — boot into the menu; race/menu transitions.
+- `scripts/game.gd` — parameterized by arena + kart; bank coins on finish; exit-to-menu.
+- `scripts/track.gd` — build from an arena spec (shape, sky, ground, decor, water, fog).
+- `scripts/kart.gd` — apply per-kart stat multipliers.
+- `scripts/kart_build.gd` — per-style kart models.
+- `scripts/hud.gd` — polished HUD + finish screen + brake button + coins.
+- `web/bridge.js` — add `window.gameProfile` (RPC client) alongside `gameNet`.
+- `README.md`, `.env.example` (+ `.env`) — document the economy + table prefix.
 
 # Verification approach
-- `godot --headless --import` clean; headless run for `_ready`/`_process` errors.
-- Export `nothreads` release; run the vetted smoke verifier (engine boots, canvas, console clean, frames).
-- Custom Playwright drive: tap-to-start -> countdown -> confirm forward motion, steering, drift sparks, mini-turbo boost, coin pickup, camera tilt (multi-frame screenshots).
-- Headless logic test of the lap state machine -> finish screen + placement + best lap.
-- Real 2-client Supabase Realtime broadcast test (one peer sends -> other receives) with the live credentials.
+- `godot --headless --import` clean; export `nothreads` release; vetted smoke verifier.
+- Playwright drive in mobile portrait + landscape viewports: tap-to-start → menu →
+  arena select → garage (buy/select) → race → finish; multi-frame screenshots assert
+  motion, steering, HUD, menu polish.
+- Real Supabase RPC tests with the anon key (done): login/bank/buy/select + negatives.
+- 2-client Supabase Realtime broadcast test (multiplayer sync).
 - Deploy `out/` to R2 for the preview link.
 
 # Out of scope
-- No database tables: multiplayer uses Realtime *broadcast* (no persistence needed); best lap is local (localStorage).
-- No accounts / auth (casual public room).
-- Server-authoritative anti-cheat (casual client-authoritative; karts pass through each other by design).
+- Email/password accounts (infeasible: project forces email confirmation). Cross-device
+  uses a transfer code instead.
+- Server-authoritative race physics (multiplayer stays casual client-authoritative).
